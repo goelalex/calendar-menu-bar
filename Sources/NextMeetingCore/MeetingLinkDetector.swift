@@ -53,7 +53,11 @@ public enum MeetingProvider: String, Sendable, CaseIterable {
             return on("teams.microsoft.com", "teams.live.com", "teams.microsoft.us")
                 && (path.contains("meetup-join") || path.hasPrefix("/meet"))
         case .webex:
-            return on("webex.com") && hasPath
+            guard on("webex.com") else { return false }
+            let components = path.split(separator: "/")
+            // Personal rooms and scheduled invitations, not help/download pages.
+            return (components.count == 2 && ["meet", "join"].contains(components[0]))
+                || (components.count == 2 && components[1] == "j.php")
         case .faceTime:
             return host == "facetime.apple.com" && path.hasPrefix("/join")
         case .slackHuddle:
@@ -114,12 +118,59 @@ public enum MeetingLinkDetector {
 
     /// All http(s) URLs in `text`, in order of appearance.
     static func urls(in text: String?) -> [URL] {
-        guard let text, !text.isEmpty else { return [] }
+        guard var text, !text.isEmpty else { return [] }
+        text = normalizeHTMLLinks(in: text)
         let range = NSRange(text.startIndex..., in: text)
         return detector.matches(in: text, options: [], range: range).compactMap { match in
             match.url.flatMap(webURL)
         }
     }
+
+    /// Decode href values without rendering HTML or changing literal entities in plain URLs.
+    /// Replacements stay in place so event/location/notes and first-link ordering is preserved.
+    private static func normalizeHTMLLinks(in text: String) -> String {
+        let result = NSMutableString(string: text)
+        let matches = htmlLink.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            guard let range = (1..<match.numberOfRanges)
+                .map({ match.range(at: $0) }).first(where: { $0.location != NSNotFound }),
+                let swiftRange = Range(range, in: text),
+                let url = URL(string: decodeHTMLEntities(String(text[swiftRange]))),
+                webURL(url) != nil else { continue }
+            result.replaceCharacters(in: range, with: url.absoluteString)
+        }
+        return result as String
+    }
+
+    /// One pass: `&amp;amp;` becomes `&amp;`, never `&`. Percent escapes are untouched.
+    private static func decodeHTMLEntities(_ text: String) -> String {
+        let named = ["amp": "&", "quot": "\"", "apos": "'", "lt": "<", "gt": ">"]
+        let result = NSMutableString(string: text)
+        for match in htmlEntity.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range(at: 1), in: text) else { continue }
+            let entity = String(text[range])
+            let replacement: String?
+            if entity.hasPrefix("#") {
+                let hex = entity.lowercased().hasPrefix("#x")
+                let digits = entity.dropFirst(hex ? 2 : 1)
+                replacement = UInt32(digits, radix: hex ? 16 : 10)
+                    .flatMap(UnicodeScalar.init).map { String($0) }
+            } else {
+                replacement = named[entity.lowercased()]
+            }
+            if let replacement { result.replaceCharacters(in: match.range, with: replacement) }
+        }
+        return result as String
+    }
+
+    private static let htmlLink = try! NSRegularExpression(
+        pattern: #"<a\b[^>]*?\s+href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#,
+        options: [.caseInsensitive]
+    )
+    private static let htmlEntity = try! NSRegularExpression(
+        pattern: #"&(#x[0-9a-f]+|#[0-9]+|amp|quot|apos|lt|gt);"#,
+        options: [.caseInsensitive]
+    )
 
     /// Only hand http(s) links to the system; drops mailto:, tel:, file:, etc.
     private static func webURL(_ url: URL) -> URL? {

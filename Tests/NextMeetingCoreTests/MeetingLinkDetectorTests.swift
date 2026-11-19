@@ -10,6 +10,8 @@ struct MeetingLinkDetectorTests {
         ("https://teams.microsoft.com/l/meetup-join/19%3ameeting_abc%40thread.v2/0?context=%7b%7d", .teams),
         ("https://teams.live.com/meet/9312345", .teams),
         ("https://acme.webex.com/acme/j.php?MTID=m123", .webex),
+        ("https://acme.webex.com/meet/alex", .webex),
+        ("https://acme.my.webex.com/join/alex", .webex),
         ("https://facetime.apple.com/join#v=1&p=abc", .faceTime),
         ("https://app.slack.com/huddle/T123/C456", .slackHuddle),
         ("https://whereby.com/team-standup", .whereby),
@@ -29,6 +31,10 @@ struct MeetingLinkDetectorTests {
         "https://teams.microsoft.com/l/channel/abc",
         "https://docs.google.com/document/d/abc",
         "https://notzoom.us/j/123",
+        "https://help.webex.com/article/123",
+        "https://www.webex.com/downloads.html",
+        "https://acme.webex.com/meet/",
+        "https://notwebex.com/meet/alex",
     ])
     func ignoresNonMeetingURLs(url: String) {
         #expect(MeetingLinkDetector.provider(for: URL(string: url)!) == nil)
@@ -75,6 +81,42 @@ struct MeetingLinkDetectorTests {
         let link = MeetingLinkDetector.detect(url: nil, location: nil, notes: notes)
         #expect(link?.provider == .googleMeet)
         #expect(link?.url.host() == "meet.google.com")
+    }
+
+    @Test(arguments: ["&amp;", "&#38;", "&#x26;"])
+    func decodesHTMLQuerySeparators(separator: String) {
+        let expected = "https://us02web.zoom.us/j/123?from=addon&pwd=secret&token=a%26b"
+        for quote in ["\"", "'", ""] {
+            let notes = "<a href=\(quote)https://us02web.zoom.us/j/123?from=addon\(separator)pwd=secret\(separator)token=a%26b\(quote)>Join Zoom</a>"
+            let link = MeetingLinkDetector.detect(url: nil, location: nil, notes: notes)
+            #expect(link?.url.absoluteString == expected)
+            #expect(link?.provider == .zoom)
+        }
+    }
+
+    @Test func decodesHTMLAttributesOnlyOnce() {
+        let notes = #"<a href="https://zoom.us/j/123?token=a&amp;amp;b">Join</a>"#
+        let link = MeetingLinkDetector.detect(url: nil, location: nil, notes: notes)
+        #expect(link?.url.absoluteString == "https://zoom.us/j/123?token=a&amp;b")
+    }
+
+    @Test func preservesLiteralEntitiesInPlainURLs() {
+        let raw = "https://zoom.us/j/123?token=a&amp;b"
+        #expect(MeetingLinkDetector.detect(url: nil, location: nil, notes: raw)?.url.absoluteString == raw)
+        #expect(MeetingLinkDetector.detect(url: URL(string: raw), location: nil, notes: nil)?.url.absoluteString == raw)
+    }
+
+    @Test func htmlLinksKeepSourceOrder() {
+        let notes = #"First https://zoom.us/j/111 <a href="https://zoom.us/j/222?x=1&amp;pwd=secret">Second</a>"#
+        #expect(MeetingLinkDetector.detect(url: nil, location: nil, notes: notes)?.url.absoluteString == "https://zoom.us/j/111")
+    }
+
+    @Test func webexHelpDoesNotOverrideMeeting() {
+        let help = "https://help.webex.com/article/123"
+        let meeting = "https://acme.webex.com/meet/alex"
+        let link = MeetingLinkDetector.detect(url: URL(string: help), location: help, notes: "Help: \(help) Join: \(meeting)")
+        #expect(link == MeetingLink(url: URL(string: meeting)!, provider: .webex))
+        #expect(MeetingLinkDetector.detect(url: nil, location: nil, notes: help) == nil)
     }
 
     @Test func providerLinkInNotesBeatsGenericEventURL() {
